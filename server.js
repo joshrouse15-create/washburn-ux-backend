@@ -3,19 +3,23 @@ const cors = require("cors");
 const axios = require("axios");
 require("dotenv").config();
 
-const OpenAI = require("openai");
+let OpenAI;
+let openai;
+
+// OPTIONAL: only load OpenAI if installed + key exists
+try {
+  OpenAI = require("openai");
+  if (process.env.OPENAI_API_KEY) {
+    openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  }
+} catch (e) {
+  console.log("OpenAI not installed or disabled");
+}
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
-
-/**
- * OPENAI (optional layer)
- */
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
 
 /**
  * HEALTH CHECK
@@ -28,7 +32,7 @@ app.get("/", (req, res) => {
 });
 
 /**
- * PAGE LIST (core enrollment funnel)
+ * PAGES TO SCAN
  */
 const pages = [
   { name: "home", url: "https://www.washburn.edu" },
@@ -42,7 +46,7 @@ const pages = [
 ];
 
 /**
- * PAGE SCAN ENGINE
+ * LIGHTWEIGHT PAGE SCANNER
  */
 app.post("/api/scan-washburn", async (req, res) => {
   console.log("SCAN STARTED");
@@ -56,44 +60,37 @@ app.post("/api/scan-washburn", async (req, res) => {
         const html = response.data || "";
         const lower = html.toLowerCase();
 
-        const hasTitle = html.includes("<title>");
-        const hasH1 = html.includes("<h1>");
-        const hasNav = html.includes("<nav>");
+        const hasTitle = lower.includes("<title>");
+        const hasH1 = lower.includes("<h1>");
+        const hasNav = lower.includes("<nav>");
 
-        const ctaSignals = [
+        const ctaWords = [
           "apply",
           "visit",
           "tour",
           "admission",
           "enroll",
           "request",
-          "submit",
-          "schedule",
-          "start"
+          "start",
+          "submit"
         ];
 
         let ctaScore = 0;
-        for (const word of ctaSignals) {
+        for (const word of ctaWords) {
           if (lower.includes(word)) ctaScore++;
         }
 
         const clarityScore = Math.min(
           100,
-          Math.round(
-            (hasTitle ? 20 : 0) +
-            (hasH1 ? 20 : 0) +
-            (hasNav ? 10 : 0) +
-            Math.min(ctaScore * 10, 50)
-          )
+          (hasTitle ? 25 : 0) +
+          (hasH1 ? 25 : 0) +
+          (hasNav ? 15 : 0) +
+          ctaScore * 10
         );
 
         const geoScore = Math.min(
           100,
-          Math.round(
-            clarityScore * 0.7 +
-            (ctaScore >= 3 ? 20 : 10) +
-            (hasTitle ? 10 : 0)
-          )
+          Math.round(clarityScore * 0.7 + ctaScore * 5)
         );
 
         results[page.name] = {
@@ -116,47 +113,39 @@ app.post("/api/scan-washburn", async (req, res) => {
       }
     }
 
-    const validPages = Object.values(results).filter(p => p.geoScore !== undefined);
+    const valid = Object.values(results).filter(r => r.geoScore !== undefined);
 
-    const avgGeoScore = validPages.length
-      ? Math.round(validPages.reduce((a, b) => a + b.geoScore, 0) / validPages.length)
-      : 0;
+    const avgGeo =
+      valid.length > 0
+        ? Math.round(valid.reduce((a, b) => a + b.geoScore, 0) / valid.length)
+        : 0;
 
-    const avgClarityScore = validPages.length
-      ? Math.round(validPages.reduce((a, b) => a + b.clarityScore, 0) / validPages.length)
-      : 0;
+    const avgClarity =
+      valid.length > 0
+        ? Math.round(valid.reduce((a, b) => a + b.clarityScore, 0) / valid.length)
+        : 0;
 
     const insights = [];
 
-    if (avgGeoScore < 70) {
-      insights.push("Overall GEO visibility is below optimal threshold");
-    }
-
-    if (results.apply?.ctaScore < 3) {
-      insights.push("Apply page may have weak conversion signals");
-    }
-
-    if (results.scholarships?.ctaScore < 2) {
-      insights.push("Scholarships page lacks strong action language");
-    }
+    if (avgGeo < 70) insights.push("GEO visibility below target threshold");
+    if ((results.apply?.ctaScore || 0) < 3) insights.push("Apply page weak CTA signals");
+    if ((results.scholarships?.ctaScore || 0) < 2) insights.push("Scholarships page weak urgency language");
 
     if (!insights.length) {
-      insights.push("Core pages are structurally stable (baseline mode)");
+      insights.push("Baseline UX structure is stable");
     }
 
-    return res.json({
+    res.json({
       status: "success",
-      overallGeoScore: avgGeoScore,
-      overallClarityScore: avgClarityScore,
+      overallGeoScore: avgGeo,
+      overallClarityScore: avgClarity,
       pages: results,
       insights,
       timestamp: new Date().toISOString()
     });
 
   } catch (err) {
-    console.error("SCAN ERROR:", err.message);
-
-    return res.status(500).json({
+    res.status(500).json({
       status: "error",
       message: err.message
     });
@@ -164,24 +153,30 @@ app.post("/api/scan-washburn", async (req, res) => {
 });
 
 /**
- * AI REWRITE ENGINE
+ * OPTIONAL AI REWRITE (SAFE GUARD)
  */
 app.post("/api/rewrite-page", async (req, res) => {
+  if (!openai) {
+    return res.status(200).json({
+      status: "disabled",
+      message: "OpenAI not enabled on this deployment"
+    });
+  }
+
   const { pageName, url, persona } = req.body;
 
   if (!pageName || !url) {
     return res.status(400).json({
-      error: "Missing pageName or url"
+      status: "error",
+      message: "Missing pageName or url"
     });
   }
 
-  const personaStyle = {
-    highschool: "Write for high school seniors exploring college options.",
-    transfer: "Write for transfer students focused on efficiency and credit transfer.",
-    adult: "Write for adult learners balancing work, life, and education."
+  const styles = {
+    highschool: "Write for high school seniors.",
+    transfer: "Write for transfer students.",
+    adult: "Write for adult learners."
   };
-
-  const style = personaStyle[persona] || personaStyle.highschool;
 
   try {
     const completion = await openai.chat.completions.create({
@@ -189,30 +184,22 @@ app.post("/api/rewrite-page", async (req, res) => {
       messages: [
         {
           role: "system",
-          content: "Return ONLY valid JSON. No markdown. No commentary."
+          content: "Return ONLY valid JSON. No markdown."
         },
         {
           role: "user",
           content: `
-Rewrite this Washburn University page:
+Rewrite this page:
 
 URL: ${url}
 Page: ${pageName}
 
 Style:
-${style}
+${styles[persona] || styles.highschool}
 
-Return JSON:
-{
-  "headline": "",
-  "subheadline": "",
-  "cta_primary": "",
-  "cta_secondary": "",
-  "body_copy": "",
-  "meta_description": "",
-  "conversion_improvements": []
-}
-          `
+Return:
+headline, subheadline, cta_primary, cta_secondary, body_copy, meta_description, conversion_improvements
+`
         }
       ],
       temperature: 0.7
@@ -220,16 +207,14 @@ Return JSON:
 
     const output = JSON.parse(completion.choices[0].message.content);
 
-    return res.json({
+    res.json({
       status: "success",
       page: pageName,
       rewrite: output
     });
 
   } catch (err) {
-    console.error("OPENAI ERROR:", err.message);
-
-    return res.status(500).json({
+    res.status(500).json({
       status: "error",
       message: err.message
     });
@@ -242,5 +227,5 @@ Return JSON:
 const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
-  console.log(`Washburn UX Backend running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
