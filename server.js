@@ -28,146 +28,129 @@ const pages = [
 ];
 
 /**
- * HEALTH CHECK
+ * HEALTH
  */
 app.get("/", (req, res) => {
   res.json({
-    status: "GEO v3 Funnel Intelligence Engine Running",
+    status: "GEO Intelligence Engine v4 Running",
     time: new Date().toISOString()
   });
 });
 
 /**
- * CLEAN HTML EXTRACTOR (improved signal quality)
+ * HTML CLEANER
  */
 function extractText(html = "") {
   return html
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<\/?[^>]+(>|$)/g, " ")
+    .replace(/<\/?[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 12000);
 }
 
 /**
- * PAGE ROLE CLASSIFIER (KEY UPGRADE)
+ * ROLE MAP (IMPORTANT FOR AI DIFFERENTIATION)
  */
-function classifyPageRole(name, url) {
+function classify(name, url) {
   if (name === "home") return "awareness";
-  if (url.includes("/apply")) return "conversion";
-  if (url.includes("/scholarship")) return "financial-aid-consideration";
-  if (url.includes("/res")) return "experience-consideration";
-  if (url.includes("/promise")) return "value-proposition";
-  if (url.includes("/neks")) return "regional-partnership";
-  if (url.includes("/snco")) return "program-exploration";
-  if (url.includes("/topeka")) return "location-trust";
-
-  return "general";
+  if (url.includes("apply")) return "conversion";
+  if (url.includes("scholar")) return "financial-aid";
+  if (url.includes("res")) return "experience";
+  if (url.includes("promise")) return "value";
+  return "support";
 }
 
 /**
- * SAFE JSON PARSER
+ * SAFE PARSER (HARDENED)
  */
 function safeParse(raw) {
-  if (!raw) throw new Error("Empty AI response");
-
   try {
     return JSON.parse(raw);
-  } catch (e) {
-    const cleaned = raw
-      .replace(/```json/g, "")
-      .replace(/```/g, "")
-      .trim();
-
-    return JSON.parse(cleaned);
+  } catch {
+    try {
+      return JSON.parse(raw.replace(/```json|```/g, "").trim());
+    } catch {
+      return null;
+    }
   }
 }
 
 /**
- * STABLE FALLBACK
+ * GUARANTEED STRUCTURE (fixes undefined everywhere)
  */
 function fallback(page, err) {
   return {
     url: page.url,
     status: "error",
-    role: classifyPageRole(page.name, page.url),
-
-    geoScore: 50,
-    clarityScore: 50,
-    conversionScore: 50,
-
-    why: ["AI pipeline failure - fallback activated"],
-    issues: [err.message],
-    fixes: ["Check OpenAI API key, response format, or HTML input"],
-    conversionLeaks: ["Unknown due to analysis failure"]
+    geoScore: 0,
+    clarityScore: 0,
+    why: ["AI failure fallback triggered"],
+    issues: [err?.message || "Unknown error"],
+    fixes: ["Check OpenAI API key / response format"],
+    conversionLeaks: ["Unable to analyze"]
   };
 }
 
 /**
- * GEO v3 AI ENGINE (FUNNEL-AWARE)
+ * AI CORE GEO ENGINE
  */
-async function analyzePage(page, html, allPagesContext = []) {
-  const clean = extractText(html);
-  const role = classifyPageRole(page.name, page.url);
+async function analyzePage(page, html, contextPages) {
+  const role = classify(page.name, page.url);
+  const content = extractText(html);
 
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 0.3,
+      temperature: 0.4,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content: `
-You are a GEO (Generative Enrollment Optimization) intelligence system.
+You are a GEO (Generative Enrollment Optimization) intelligence engine.
 
-CRITICAL RULES:
-- Score must be ROLE-BASED (not generic)
-- Awareness pages score differently than conversion pages
-- Always explain WHY this page differs from others
-- Never output generic insights
-- Always return valid JSON
+RULES:
+- Scores MUST differ across pages based on role + content
+- Never reuse patterns between pages
+- You MUST explain WHY each score exists
+- Output must be strict JSON only
+- Be specific, not generic
 `
         },
         {
           role: "user",
           content: `
-PAGE:
-${page.name}
+PAGE: ${page.name}
 URL: ${page.url}
 ROLE: ${role}
 
-ALL PAGES CONTEXT:
-${JSON.stringify(allPagesContext.map(p => ({ name: p.name, url: p.url })))}
+OTHER PAGES CONTEXT:
+${JSON.stringify(contextPages)}
 
-PAGE CONTENT:
-${clean}
+CONTENT:
+${content}
 
 Return JSON:
 
 {
-  "role": "${role}",
-
   "geoScore": number,
   "clarityScore": number,
-  "conversionScore": number,
 
-  "why": ["specific reasoning tied to ROLE + content"],
-  "issues": ["real UX or messaging gaps"],
-  "fixes": ["specific actionable improvements"],
-  "conversionLeaks": ["where users drop off or hesitate"],
+  "why": ["detailed reasoning tied to content + role"],
 
-  "funnelInsight": "why this page performs at this stage of the funnel",
+  "issues": ["specific UX or messaging gaps"],
 
-  "competitivePositioning": "how this page compares to other Washburn pages in purpose",
+  "fixes": ["actionable improvements (not generic advice)"],
 
-  "sectionAnalysis": {
-    "hero": { "score": number, "insight": "", "fix": "" },
-    "cta": { "score": number, "insight": "", "fix": "" },
-    "trust": { "score": number, "insight": "", "fix": "" },
-    "navigation": { "score": number, "insight": "", "fix": "" }
-  }
+  "conversionLeaks": [
+    "where users hesitate or drop off"
+  ],
+
+  "pageDiagnosis": "2-3 sentence expert evaluation",
+
+  "priorityFix": "single highest-impact change"
 }
 `
         }
@@ -177,21 +160,22 @@ Return JSON:
     const raw = completion?.choices?.[0]?.message?.content;
     const parsed = safeParse(raw);
 
+    if (!parsed) return fallback(page, new Error("Invalid JSON from AI"));
+
     return {
-      role,
-      geoScore: parsed.geoScore ?? 55,
-      clarityScore: parsed.clarityScore ?? 55,
-      conversionScore: parsed.conversionScore ?? 55,
+      url: page.url,
+      status: "success",
 
-      why: parsed.why ?? [],
-      issues: parsed.issues ?? [],
-      fixes: parsed.fixes ?? [],
-      conversionLeaks: parsed.conversionLeaks ?? [],
+      geoScore: parsed.geoScore ?? 50,
+      clarityScore: parsed.clarityScore ?? 50,
 
-      funnelInsight: parsed.funnelInsight ?? "",
-      competitivePositioning: parsed.competitivePositioning ?? "",
+      why: parsed.why || [],
+      issues: parsed.issues || [],
+      fixes: parsed.fixes || [],
+      conversionLeaks: parsed.conversionLeaks || [],
 
-      sectionAnalysis: parsed.sectionAnalysis ?? {}
+      pageDiagnosis: parsed.pageDiagnosis || "",
+      priorityFix: parsed.priorityFix || ""
     };
 
   } catch (err) {
@@ -200,28 +184,19 @@ Return JSON:
 }
 
 /**
- * MAIN SCAN ENGINE (WITH CROSS-PAGE CONTEXT)
+ * SCAN ENGINE
  */
 app.post("/api/scan-washburn", async (req, res) => {
   const results = {};
-
-  const contextPages = pages.map(p => ({
-    name: p.name,
-    url: p.url
-  }));
+  const context = pages.map(p => ({ name: p.name, url: p.url }));
 
   for (const page of pages) {
     try {
-      const response = await axios.get(page.url, { timeout: 15000 });
-      const html = response.data || "";
+      const html = (await axios.get(page.url, { timeout: 15000 })).data;
 
-      const ai = await analyzePage(page, html, contextPages);
+      const ai = await analyzePage(page, html, context);
 
-      results[page.name] = {
-        url: page.url,
-        status: "success",
-        ...ai
-      };
+      results[page.name] = ai;
 
     } catch (err) {
       results[page.name] = fallback(page, err);
@@ -230,23 +205,25 @@ app.post("/api/scan-washburn", async (req, res) => {
 
   const valid = Object.values(results).filter(r => r.status === "success");
 
-  const avgGeo = Math.round(valid.reduce((a, b) => a + b.geoScore, 0) / valid.length);
-  const avgClarity = Math.round(valid.reduce((a, b) => a + b.clarityScore, 0) / valid.length);
+  const avgGeo = Math.round(
+    valid.reduce((a, b) => a + b.geoScore, 0) / valid.length
+  );
 
-  const insights = [
-    "GEO v3 Funnel Intelligence scan complete",
-    `${valid.length} pages analyzed`,
-    "Scores now role-weighted by funnel stage",
-    "Cross-page comparison enabled"
-  ];
+  const avgClarity = Math.round(
+    valid.reduce((a, b) => a + b.clarityScore, 0) / valid.length
+  );
 
   res.json({
     status: "success",
     overallGeoScore: avgGeo,
     overallClarityScore: avgClarity,
     pages: results,
-    insights,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    insights: [
+      "AI-driven GEO scoring active",
+      "Role-based page differentiation enabled",
+      "Conversion leak detection active"
+    ]
   });
 });
 
@@ -256,31 +233,24 @@ app.post("/api/scan-washburn", async (req, res) => {
 app.post("/api/rewrite-page", async (req, res) => {
   const { pageName, url, persona } = req.body;
 
-  const styleMap = {
-    highschool: "High school seniors: energetic, simple, motivating.",
-    transfer: "Transfer students: efficient, clear value focus.",
-    adult: "Adult learners: flexible, outcome-focused."
-  };
-
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
+      temperature: 0.4,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
-          content: "Return ONLY valid JSON enrollment copy."
+          content: "Return ONLY valid JSON marketing copy."
         },
         {
           role: "user",
           content: `
 Page: ${pageName}
 URL: ${url}
+Persona: ${persona}
 
-Audience:
-${styleMap[persona] || styleMap.highschool}
-
-Return JSON:
+Return:
 {
   "headline": "",
   "subheadline": "",
@@ -296,12 +266,18 @@ Return JSON:
     });
 
     const raw = completion?.choices?.[0]?.message?.content;
-    const rewrite = safeParse(raw);
+    const parsed = safeParse(raw);
+
+    if (!parsed) {
+      return res.status(500).json({
+        status: "error",
+        message: "AI returned invalid JSON"
+      });
+    }
 
     res.json({
       status: "success",
-      page: pageName,
-      rewrite
+      rewrite: parsed
     });
 
   } catch (err) {
@@ -313,10 +289,10 @@ Return JSON:
 });
 
 /**
- * START SERVER
+ * START
  */
 const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
-  console.log(`GEO v3 Funnel Intelligence Engine running on port ${PORT}`);
+  console.log(`GEO Intelligence Engine running on port ${PORT}`);
 });
