@@ -1,83 +1,76 @@
-require("dotenv").config();
 const express = require("express");
-const axios = require("axios");
-const cheerio = require("cheerio");
-const OpenAI = require("openai");
 const cors = require("cors");
+const axios = require("axios");
+require("dotenv").config();
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+/**
+ * HEALTH CHECK (TEST ROUTE)
+ * Use this first to confirm Render + Slate connection works
+ */
+app.get("/", (req, res) => {
+  res.json({
+    status: "Washburn UX Backend Running",
+    time: new Date().toISOString()
+  });
 });
 
-const BASE = "https://www.washburn.edu";
-
-// Grab a few internal links (light scan, safe)
-async function getPages() {
-  const home = await axios.get(BASE);
-  const $ = cheerio.load(home.data);
-
-  const links = [];
-
-  $("a").each((_, el) => {
-    const href = $(el).attr("href");
-
-    if (!href) return;
-
-    if (href.startsWith("/")) {
-      links.push(BASE + href);
-    }
-  });
-
-  return [...new Set(links)].slice(0, 6);
-}
-
-// MAIN SCAN ENDPOINT
+/**
+ * MAIN SLATE ENDPOINT
+ * SAFE VERSION (NO AI YET — PREVENTS HANGING)
+ */
 app.post("/api/scan-washburn", async (req, res) => {
+  console.log("SCAN REQUEST RECEIVED");
+
   try {
-    const pages = await getPages();
-
-    const content = [];
-
-    for (const url of pages) {
-      try {
-        const page = await axios.get(url);
-        const $ = cheerio.load(page.data);
-
-        content.push({
-          url,
-          text: $("body").text().replace(/\s+/g, " ").slice(0, 1200)
-        });
-      } catch {}
-    }
-
-    const ai = await client.responses.create({
-      model: "gpt-4.1-mini",
-      input: `
-You are a UX expert analyzing Washburn University’s website.
-
-Return:
-- UX issues
-- clarity problems
-- conversion improvements
-- rewritten homepage messaging
-
-CONTENT:
-${JSON.stringify(content)}
-`,
-      response_format: { type: "json_object" }
+    // STEP 1: confirm we can reach Washburn
+    const page = await axios.get("https://www.washburn.edu", {
+      timeout: 10000
     });
 
-    res.json(JSON.parse(ai.output_text));
+    const html = page.data || "";
+
+    // STEP 2: lightweight fake "analysis" (placeholder for AI later)
+    const response = {
+      status: "success",
+      message: "Backend is working and Washburn homepage was reached",
+      metrics: {
+        htmlLength: html.length,
+        hasTitleTag: html.includes("<title>"),
+        hasNav: html.includes("<nav>")
+      },
+      issues: [
+        "AI analysis temporarily disabled (stability mode)",
+        "This confirms full pipeline connectivity"
+      ],
+      recommendations: [
+        "Enable AI layer once deployment is stable",
+        "Add structured page parsing next step"
+      ],
+      timestamp: new Date().toISOString()
+    };
+
+    return res.json(response);
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("ERROR:", err.message);
+
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
   }
 });
 
-app.listen(3001, () => {
-  console.log("Washburn UX scanner running on http://localhost:3001");
+/**
+ * START SERVER
+ */
+const PORT = process.env.PORT || 3001;
+
+app.listen(PORT, () => {
+  console.log(`Washburn UX Backend running on port ${PORT}`);
 });
