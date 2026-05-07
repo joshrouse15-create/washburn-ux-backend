@@ -225,7 +225,90 @@ headline, subheadline, cta_primary, cta_secondary, body_copy, meta_description, 
  * START SERVER
  */
 const PORT = process.env.PORT || 3001;
+/**
+ * RAW AI DEBUG ENDPOINT
+ * This bypasses ALL scoring logic and shows EXACT OpenAI output
+ */
+app.post("/api/debug-ai", async (req, res) => {
+  const { url, pageName = "test-page" } = req.body;
 
+  if (!url) {
+    return res.status(400).json({
+      error: "Missing url"
+    });
+  }
+
+  try {
+    const response = await axios.get(url, { timeout: 15000 });
+    const html = response.data || "";
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `
+You are a GEO analysis engine.
+
+Return ONLY JSON. No commentary.
+Be extremely detailed and return all fields.
+`
+        },
+        {
+          role: "user",
+          content: `
+Analyze this page:
+
+PAGE: ${pageName}
+URL: ${url}
+
+HTML:
+${html.slice(0, 12000)}
+
+Return JSON:
+
+{
+  "geoScore": number,
+  "clarityScore": number,
+  "conversionScore": number,
+
+  "why": [],
+  "issues": [],
+  "fixes": [],
+  "conversionLeaks": [],
+
+  "rawSignals": {
+    "titleDetected": boolean,
+    "ctaMentions": number,
+    "h1Detected": boolean,
+    "navDetected": boolean
+  },
+
+  "notes": "Explain reasoning in detail"
+}
+`
+        }
+      ]
+    });
+
+    const raw = completion?.choices?.[0]?.message?.content;
+
+    return res.json({
+      status: "debug",
+      url,
+      rawOpenAIOutput: raw,
+      parsed: safeParse(raw)
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
+});
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
