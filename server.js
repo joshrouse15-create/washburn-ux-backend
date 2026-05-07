@@ -24,7 +24,7 @@ app.get("/", (req, res) => {
 });
 
 /**
- * CORE PAGES
+ * PAGES
  */
 const pages = [
   { name: "home", url: "https://www.washburn.edu" },
@@ -38,30 +38,43 @@ const pages = [
 ];
 
 /**
- * AI SCORING ENGINE (REAL GEO + CLARITY + REASONING)
+ * FALLBACK ENGINE (NEVER BREAK FRONTEND)
+ */
+function fallbackAI(reason) {
+  return {
+    geoScore: 0,
+    clarityScore: 0,
+    ctaScore: 0,
+    why: [`AI fallback triggered: ${reason}`],
+    issues: ["AI scoring failed safely"],
+    fixes: [
+      "Check OpenAI API key",
+      "Check model access (gpt-4o-mini)",
+      "Check token limits",
+      "Verify Render environment variables"
+    ],
+    conversionLeaks: []
+  };
+}
+
+/**
+ * AI SCORING ENGINE (HARDENED)
  */
 async function scorePageWithAI({ name, url, html }) {
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
+      temperature: 0.4,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content: `
-You are a higher education GEO + conversion optimization expert.
+You are a strict GEO + enrollment conversion analyst.
 
 Return ONLY valid JSON.
-
-You evaluate:
-- GEO score (0–100): how well page aligns with search + enrollment intent
-- Clarity score (0–100): how understandable + structured the page is
-- CTA score (0–10)
-- conversion leaks
-- reasons
-- fixes
-
-Be strict but realistic.
+No markdown. No commentary.
+Always return complete JSON even if uncertain.
 `
         },
         {
@@ -69,33 +82,44 @@ Be strict but realistic.
           content: `
 Analyze this page:
 
-NAME: ${name}
+PAGE: ${name}
 URL: ${url}
 
 HTML:
 ${html.slice(0, 12000)}
 
-Return JSON exactly like:
+Return EXACT JSON:
 {
   "geoScore": number,
   "clarityScore": number,
   "ctaScore": number,
-  "why": [],
-  "issues": [],
-  "fixes": [],
-  "conversionLeaks": []
+  "why": ["string"],
+  "issues": ["string"],
+  "fixes": ["string"],
+  "conversionLeaks": ["string"]
 }
 `
         }
       ]
     });
 
-    const parsed = JSON.parse(completion.choices[0].message.content);
+    const raw = completion?.choices?.[0]?.message?.content;
+
+    if (!raw) return fallbackAI("Empty OpenAI response");
+
+    let parsed;
+
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      return fallbackAI("Invalid JSON returned by OpenAI");
+    }
 
     return {
-      geoScore: parsed.geoScore ?? 0,
-      clarityScore: parsed.clarityScore ?? 0,
-      ctaScore: parsed.ctaScore ?? 0,
+      geoScore: Number(parsed.geoScore ?? 0),
+      clarityScore: Number(parsed.clarityScore ?? 0),
+      ctaScore: Number(parsed.ctaScore ?? 0),
+
       why: parsed.why ?? [],
       issues: parsed.issues ?? [],
       fixes: parsed.fixes ?? [],
@@ -103,20 +127,12 @@ Return JSON exactly like:
     };
 
   } catch (err) {
-    return {
-      geoScore: 0,
-      clarityScore: 0,
-      ctaScore: 0,
-      why: ["AI scoring failed"],
-      issues: ["OpenAI request failed"],
-      fixes: ["Check API key / model access"],
-      conversionLeaks: []
-    };
+    return fallbackAI(err.message);
   }
 }
 
 /**
- * SCAN ENGINE (STABLE + NO BREAKS)
+ * MAIN SCAN ENGINE
  */
 app.post("/api/scan-washburn", async (req, res) => {
   console.log("SCAN STARTED");
@@ -144,7 +160,7 @@ app.post("/api/scan-washburn", async (req, res) => {
       }
 
       /**
-       * AI SCORING (REAL INTELLIGENCE LAYER)
+       * AI LAYER
        */
       const ai = await scorePageWithAI({
         name: page.name,
@@ -153,18 +169,14 @@ app.post("/api/scan-washburn", async (req, res) => {
       });
 
       /**
-       * FINAL COMBINED SCORE MODEL
+       * FINAL SCORES (HYBRID MODEL)
        */
       const geoScore = Math.round(
-        (ai.geoScore * 0.7) +
-        (ctaScore * 6) +
-        (hasTitle ? 5 : 0)
+        (ai.geoScore * 0.7) + (ctaScore * 6) + (hasTitle ? 5 : 0)
       );
 
       const clarityScore = Math.round(
-        (ai.clarityScore * 0.7) +
-        (hasH1 ? 10 : 0) +
-        (hasNav ? 5 : 0)
+        (ai.clarityScore * 0.7) + (hasH1 ? 10 : 0) + (hasNav ? 5 : 0)
       );
 
       results[page.name] = {
@@ -203,7 +215,7 @@ app.post("/api/scan-washburn", async (req, res) => {
   }
 
   /**
-   * SAFE AVERAGES
+   * SAFE AGGREGATION
    */
   const valid = Object.values(results).filter(p => p.status === "success");
 
@@ -216,12 +228,12 @@ app.post("/api/scan-washburn", async (req, res) => {
     : 0;
 
   const insights = [
-    `${valid.length} pages successfully analyzed`,
-    overallGeoScore > 80 ? "Strong GEO performance" : "GEO needs optimization",
+    `${valid.length} pages analyzed successfully`,
+    overallGeoScore > 80 ? "Strong GEO performance" : "GEO optimization needed",
     overallClarityScore > 80 ? "Strong clarity structure" : "Clarity improvements needed"
   ];
 
-  return res.json({
+  res.json({
     status: "success",
     overallGeoScore,
     overallClarityScore,
@@ -232,7 +244,7 @@ app.post("/api/scan-washburn", async (req, res) => {
 });
 
 /**
- * AI COPY ENGINE (SAFE + STABLE)
+ * AI COPY ENGINE (SAFE)
  */
 app.post("/api/rewrite-page", async (req, res) => {
   const { pageName, url, persona } = req.body;
@@ -253,7 +265,7 @@ app.post("/api/rewrite-page", async (req, res) => {
         {
           role: "user",
           content: `
-Rewrite page for conversion:
+Rewrite page:
 
 Page: ${pageName}
 URL: ${url}
@@ -274,9 +286,11 @@ Return:
       ]
     });
 
+    const raw = completion.choices[0].message.content;
+
     return res.json({
       status: "success",
-      rewrite: JSON.parse(completion.choices[0].message.content)
+      rewrite: JSON.parse(raw)
     });
 
   } catch (err) {
