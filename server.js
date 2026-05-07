@@ -8,15 +8,12 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
-/**
- * OpenAI client (safe init)
- */
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
 
 /**
- * Pages to analyze
+ * PAGES
  */
 const pages = [
   { name: "home", url: "https://www.washburn.edu" },
@@ -30,70 +27,34 @@ const pages = [
 ];
 
 /**
- * SAFE HTML FEATURE EXTRACTION
+ * EXTRACT SIGNALS (baseline only, NOT scoring)
  */
 function extractSignals(html = "") {
   const lower = html.toLowerCase();
 
-  const hasTitle = lower.includes("<title>");
-  const hasH1 = lower.includes("<h1");
-  const hasNav = lower.includes("<nav");
-
-  const ctaSignals = [
-    "apply",
-    "request",
-    "visit",
-    "tour",
-    "schedule",
-    "enroll",
-    "start",
-    "submit",
-    "learn more",
-    "get started"
-  ];
-
-  let ctaScore = 0;
-  for (const s of ctaSignals) {
-    if (lower.includes(s)) ctaScore++;
-  }
-
   return {
-    hasTitle,
-    hasH1,
-    hasNav,
-    ctaScore: Math.min(ctaScore, 10),
+    hasTitle: lower.includes("<title>"),
+    hasH1: lower.includes("<h1"),
+    hasNav: lower.includes("<nav"),
     htmlLength: html.length
   };
 }
 
 /**
- * FALLBACK SCORING (used if AI fails)
+ * SAFE DEFAULT (NEVER undefined again)
  */
-function fallbackScore(signals) {
-  const clarity =
-    (signals.hasTitle ? 20 : 0) +
-    (signals.hasH1 ? 20 : 0) +
-    (signals.hasNav ? 10 : 0) +
-    signals.ctaScore * 5;
-
-  const geo =
-    clarity * 0.7 +
-    signals.ctaScore * 8;
-
-  return {
-    clarityScore: Math.round(clarity),
-    geoScore: Math.round(geo)
-  };
+function safeNumber(n, fallback = 0) {
+  return typeof n === "number" && !isNaN(n) ? n : fallback;
 }
 
 /**
- * AI SCORING ENGINE (REAL RUBRIC)
+ * AI PAGE SCORING (PRIMARY ENGINE)
  */
-async function aiScorePage({ name, url, html }) {
+async function scoreWithAI({ name, url, html }) {
   if (!openai) return null;
 
   try {
-    const completion = await openai.chat.completions.create({
+    const resp = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.2,
       response_format: { type: "json_object" },
@@ -101,25 +62,30 @@ async function aiScorePage({ name, url, html }) {
         {
           role: "system",
           content: `
-You are a higher education UX + enrollment conversion analyst.
+You are an enrollment UX scoring engine.
 
-You score pages using STRICT RUBRIC:
+You MUST return full structured JSON.
 
-GEO Score (0-100):
-- Enrollment intent clarity (30)
-- CTA strength (25)
-- Message hierarchy (20)
-- Conversion friction (15)
-- Persuasiveness (10)
+Scoring rules:
 
-Clarity Score (0-100):
-- Readability (30)
-- Structure (25)
-- Navigation clarity (20)
-- Scannability (15)
-- Content focus (10)
+GEO Score (0–100):
+- enrollment intent strength
+- CTA clarity
+- urgency & persuasion
+- action hierarchy
+- conversion readiness
 
-Return ONLY valid JSON.
+Clarity Score (0–100):
+- readability
+- structure
+- scanning ease
+- cognitive load
+- message focus
+
+IMPORTANT:
+- Never omit fields
+- Never return null
+- Always return arrays even if empty
 `
         },
         {
@@ -127,30 +93,29 @@ Return ONLY valid JSON.
           content: `
 Analyze this page:
 
-Name: ${name}
+NAME: ${name}
 URL: ${url}
 
-HTML (truncated):
+HTML:
 ${html.slice(0, 12000)}
 
-Return JSON exactly like:
+Return JSON:
 
 {
   "geoScore": number,
   "clarityScore": number,
-  "why": {
-    "geo": ["bullet reason 1", "bullet reason 2"],
-    "clarity": ["bullet reason 1", "bullet reason 2"]
-  },
-  "conversionLeaks": ["issue 1", "issue 2"],
-  "ctaQuality": number
+  "ctaScore": number,
+  "whyGeo": [""],
+  "whyClarity": [""],
+  "issues": [""],
+  "fixes": [""]
 }
 `
         }
       ]
     });
 
-    return JSON.parse(completion.choices[0].message.content);
+    return JSON.parse(resp.choices[0].message.content);
   } catch (err) {
     console.log("AI scoring failed:", err.message);
     return null;
@@ -158,47 +123,72 @@ Return JSON exactly like:
 }
 
 /**
- * INSIGHTS ENGINE
+ * FALLBACK SCORING (ONLY IF AI FAILS)
  */
-function buildGlobalInsights(results) {
-  const pagesArr = Object.values(results);
+function fallback(signals) {
+  const geo =
+    (signals.hasTitle ? 20 : 0) +
+    (signals.hasH1 ? 25 : 0) +
+    (signals.hasNav ? 10 : 0) +
+    30;
 
-  const failed = pagesArr.filter(p => p.status !== "success");
+  const clarity =
+    (signals.hasTitle ? 25 : 0) +
+    (signals.hasH1 ? 25 : 0) +
+    (signals.hasNav ? 15 : 0) +
+    20;
+
+  return {
+    geoScore: geo,
+    clarityScore: clarity,
+    ctaScore: 5,
+    whyGeo: ["Fallback scoring used"],
+    whyClarity: ["Fallback scoring used"],
+    issues: ["AI scoring unavailable"],
+    fixes: ["Ensure OpenAI API key is valid"]
+  };
+}
+
+/**
+ * GLOBAL INSIGHTS (FOR DASHBOARD)
+ */
+function buildGlobal(pages) {
+  const arr = Object.values(pages);
+
   const avgGeo =
-    pagesArr.reduce((sum, p) => sum + (p.geoScore || 0), 0) /
-    Math.max(pagesArr.length, 1);
+    arr.reduce((a, b) => a + safeNumber(b.geoScore), 0) / arr.length;
 
-  const weakCTAs = pagesArr.filter(p => (p.ctaScore || 0) < 3);
+  const avgClarity =
+    arr.reduce((a, b) => a + safeNumber(b.clarityScore), 0) / arr.length;
 
-  const leaks = pagesArr
-    .flatMap(p => p.conversionLeaks || [])
-    .filter(Boolean);
+  const issues = [];
 
-  const insights = [];
-
-  if (failed.length) {
-    insights.push(`${failed.length} pages failed to load`);
+  const lowPages = arr.filter(p => p.geoScore < 80);
+  if (lowPages.length) {
+    issues.push(`${lowPages.length} pages below GEO threshold (80)`);
   }
 
-  if (avgGeo < 80) {
-    insights.push("Overall GEO performance is below strong enrollment threshold (<80)");
+  const weakCTA = arr.filter(p => (p.ctaScore || 0) < 6);
+  if (weakCTA.length) {
+    issues.push("CTA weakness detected on multiple pages");
   }
 
-  if (weakCTAs.length) {
-    insights.push("Multiple pages have weak CTA density or unclear action hierarchy");
+  const structuralIssues = arr.filter(p =>
+    (p.whyGeo || []).length === 0
+  );
+
+  if (structuralIssues.length) {
+    issues.push("Some pages lack AI explanation layers");
   }
 
-  if (leaks.length) {
-    insights.push("Conversion leaks detected across navigation and CTA structure");
-  }
-
-  if (!insights.length) {
-    insights.push("Strong enrollment UX performance across all scanned pages");
+  if (!issues.length) {
+    issues.push("Strong enrollment UX consistency across site");
   }
 
   return {
-    avgGeo: Math.round(avgGeo),
-    insights
+    overallGeoScore: Math.round(avgGeo || 0),
+    overallClarityScore: Math.round(avgClarity || 0),
+    globalIssues: issues
   };
 }
 
@@ -216,68 +206,66 @@ app.get("/", (req, res) => {
  * MAIN SCAN ENGINE
  */
 app.post("/api/scan-washburn", async (req, res) => {
-  console.log("SCAN STARTED");
-
   const results = {};
 
   for (const page of pages) {
     try {
-      const response = await axios.get(page.url, { timeout: 12000 });
-      const html = response.data || "";
+      const r = await axios.get(page.url, { timeout: 12000 });
+      const html = r.data || "";
 
       const signals = extractSignals(html);
 
-      // AI scoring (preferred)
-      const ai = await aiScorePage({
+      const ai = await scoreWithAI({
         name: page.name,
         url: page.url,
         html
       });
 
-      let geoScore, clarityScore, why, conversionLeaks, ctaQuality;
+      let final;
 
       if (ai && typeof ai.geoScore === "number") {
-        geoScore = ai.geoScore;
-        clarityScore = ai.clarityScore;
-        why = ai.why;
-        conversionLeaks = ai.conversionLeaks || [];
-        ctaQuality = ai.ctaQuality || signals.ctaScore;
-      } else {
-        const fallback = fallbackScore(signals);
-
-        geoScore = fallback.geoScore;
-        clarityScore = fallback.clarityScore;
-        why = {
-          geo: ["Fallback scoring used (AI unavailable or failed)"],
-          clarity: ["Fallback scoring used (AI unavailable or failed)"]
+        final = {
+          url: page.url,
+          status: "success",
+          geoScore: safeNumber(ai.geoScore),
+          clarityScore: safeNumber(ai.clarityScore),
+          ctaScore: safeNumber(ai.ctaScore),
+          whyGeo: ai.whyGeo || [],
+          whyClarity: ai.whyClarity || [],
+          issues: ai.issues || [],
+          fixes: ai.fixes || []
         };
-        conversionLeaks = [];
-        ctaQuality = signals.ctaScore;
+      } else {
+        const fb = fallback(signals);
+
+        final = {
+          url: page.url,
+          status: "fallback",
+          geoScore: fb.geoScore,
+          clarityScore: fb.clarityScore,
+          ctaScore: fb.ctaScore,
+          whyGeo: fb.whyGeo,
+          whyClarity: fb.whyClarity,
+          issues: fb.issues,
+          fixes: fb.fixes
+        };
       }
 
-      results[page.name] = {
-        url: page.url,
-        status: "success",
-        ...signals,
-        geoScore,
-        clarityScore,
-        ctaScore: ctaQuality,
-        why,
-        conversionLeaks
-      };
+      results[page.name] = final;
     } catch (err) {
       results[page.name] = {
         url: page.url,
         status: "error",
-        message: err.message,
         geoScore: 0,
         clarityScore: 0,
-        ctaScore: 0
+        ctaScore: 0,
+        issues: [err.message],
+        fixes: ["Page failed to load"]
       };
     }
   }
 
-  const global = buildGlobalInsights(results);
+  const global = buildGlobal(results);
 
   res.json({
     status: "success",
@@ -288,65 +276,7 @@ app.post("/api/scan-washburn", async (req, res) => {
 });
 
 /**
- * AI COPY ENGINE (STABLE)
- */
-app.post("/api/rewrite-page", async (req, res) => {
-  const { pageName, url, persona } = req.body;
-
-  if (!openai) {
-    return res.status(500).json({ error: "OpenAI not configured" });
-  }
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.4,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a conversion copywriter for higher education landing pages."
-        },
-        {
-          role: "user",
-          content: `
-Rewrite page for enrollment conversion:
-
-Page: ${pageName}
-URL: ${url}
-Audience: ${persona || "highschool"}
-
-Return JSON:
-{
-  "headline": "",
-  "subheadline": "",
-  "cta_primary": "",
-  "cta_secondary": "",
-  "body_copy": "",
-  "meta_description": "",
-  "conversion_improvements": []
-}
-`
-        }
-      ]
-    });
-
-    res.json({
-      status: "success",
-      page: pageName,
-      rewrite: JSON.parse(completion.choices[0].message.content)
-    });
-  } catch (err) {
-    res.status(500).json({
-      status: "error",
-      message: err.message
-    });
-  }
-});
-
-/**
- * START SERVER
+ * START
  */
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
