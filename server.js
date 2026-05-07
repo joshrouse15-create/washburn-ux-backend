@@ -1,35 +1,22 @@
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
+const OpenAI = require("openai");
 require("dotenv").config();
-
-let OpenAI;
-try {
-  OpenAI = require("openai");
-} catch (e) {
-  console.warn("OpenAI SDK not installed. AI features will fallback.");
-}
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
-const openai = OpenAI
+/**
+ * OpenAI client (safe init)
+ */
+const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
 
 /**
- * HEALTH CHECK
- */
-app.get("/", (req, res) => {
-  res.json({
-    status: "Washburn UX Backend Running",
-    time: new Date().toISOString()
-  });
-});
-
-/**
- * PAGES
+ * Pages to analyze
  */
 const pages = [
   { name: "home", url: "https://www.washburn.edu" },
@@ -43,108 +30,194 @@ const pages = [
 ];
 
 /**
- * CORE SCORING RUBRIC (stable + explainable)
+ * SAFE HTML FEATURE EXTRACTION
  */
-function scorePage({ html, url }) {
+function extractSignals(html = "") {
   const lower = html.toLowerCase();
 
-  const hasTitle = html.includes("<title>");
-  const hasH1 = html.includes("<h1>");
-  const hasNav = html.includes("<nav>");
+  const hasTitle = lower.includes("<title>");
+  const hasH1 = lower.includes("<h1");
+  const hasNav = lower.includes("<nav");
 
   const ctaSignals = [
-    "apply", "request", "visit", "tour",
-    "admission", "enroll", "start", "submit",
-    "schedule", "learn more", "get started"
+    "apply",
+    "request",
+    "visit",
+    "tour",
+    "schedule",
+    "enroll",
+    "start",
+    "submit",
+    "learn more",
+    "get started"
   ];
 
-  let ctaHits = 0;
-  const ctaMatches = [];
-
-  for (const word of ctaSignals) {
-    if (lower.includes(word)) {
-      ctaHits++;
-      ctaMatches.push(word);
-    }
+  let ctaScore = 0;
+  for (const s of ctaSignals) {
+    if (lower.includes(s)) ctaScore++;
   }
-
-  const structureScore =
-    (hasTitle ? 20 : 0) +
-    (hasH1 ? 20 : 0) +
-    (hasNav ? 15 : 0);
-
-  const ctaScore = Math.min(ctaHits * 8, 40);
-
-  const clarityScore = Math.min(
-    100,
-    structureScore + ctaScore + 15
-  );
-
-  const geoScore = Math.round(
-    (clarityScore * 0.65) + (ctaScore * 0.8)
-  );
 
   return {
     hasTitle,
     hasH1,
     hasNav,
-    ctaHits,
-    ctaMatches,
-    clarityScore,
-    geoScore
+    ctaScore: Math.min(ctaScore, 10),
+    htmlLength: html.length
   };
 }
 
 /**
- * WHY SCORE EXPLANATION ENGINE
+ * FALLBACK SCORING (used if AI fails)
  */
-function explainScore(page, score) {
-  const reasons = [];
+function fallbackScore(signals) {
+  const clarity =
+    (signals.hasTitle ? 20 : 0) +
+    (signals.hasH1 ? 20 : 0) +
+    (signals.hasNav ? 10 : 0) +
+    signals.ctaScore * 5;
 
-  if (!score.hasTitle) reasons.push("Missing <title> reduces SEO clarity.");
-  if (!score.hasH1) reasons.push("No primary H1 reduces message hierarchy.");
-  if (!score.hasNav) reasons.push("Missing navigation weakens UX structure.");
+  const geo =
+    clarity * 0.7 +
+    signals.ctaScore * 8;
 
-  if (score.ctaHits === 0) {
-    reasons.push("No clear conversion actions detected.");
-  } else if (score.ctaHits < 3) {
-    reasons.push("CTA density is low for enrollment conversion.");
-  }
-
-  if (score.ctaHits >= 5) {
-    reasons.push("Strong CTA presence improves conversion potential.");
-  }
-
-  return reasons.length
-    ? reasons
-    : ["Strong structural and conversion signals across page."];
+  return {
+    clarityScore: Math.round(clarity),
+    geoScore: Math.round(geo)
+  };
 }
 
 /**
- * LEAK DETECTION
+ * AI SCORING ENGINE (REAL RUBRIC)
  */
-function detectLeaks(score) {
-  const leaks = [];
+async function aiScorePage({ name, url, html }) {
+  if (!openai) return null;
 
-  if (score.ctaHits < 2) {
-    leaks.push("Conversion leak: weak or missing CTA funnel entry points.");
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `
+You are a higher education UX + enrollment conversion analyst.
+
+You score pages using STRICT RUBRIC:
+
+GEO Score (0-100):
+- Enrollment intent clarity (30)
+- CTA strength (25)
+- Message hierarchy (20)
+- Conversion friction (15)
+- Persuasiveness (10)
+
+Clarity Score (0-100):
+- Readability (30)
+- Structure (25)
+- Navigation clarity (20)
+- Scannability (15)
+- Content focus (10)
+
+Return ONLY valid JSON.
+`
+        },
+        {
+          role: "user",
+          content: `
+Analyze this page:
+
+Name: ${name}
+URL: ${url}
+
+HTML (truncated):
+${html.slice(0, 12000)}
+
+Return JSON exactly like:
+
+{
+  "geoScore": number,
+  "clarityScore": number,
+  "why": {
+    "geo": ["bullet reason 1", "bullet reason 2"],
+    "clarity": ["bullet reason 1", "bullet reason 2"]
+  },
+  "conversionLeaks": ["issue 1", "issue 2"],
+  "ctaQuality": number
+}
+`
+        }
+      ]
+    });
+
+    return JSON.parse(completion.choices[0].message.content);
+  } catch (err) {
+    console.log("AI scoring failed:", err.message);
+    return null;
   }
-
-  if (!score.hasH1) {
-    leaks.push("UX leak: missing H1 reduces orientation and increases drop-off risk.");
-  }
-
-  if (score.clarityScore < 70) {
-    leaks.push("Messaging leak: page structure likely unclear for prospective students.");
-  }
-
-  return leaks;
 }
 
 /**
- * SCAN ENGINE
+ * INSIGHTS ENGINE
+ */
+function buildGlobalInsights(results) {
+  const pagesArr = Object.values(results);
+
+  const failed = pagesArr.filter(p => p.status !== "success");
+  const avgGeo =
+    pagesArr.reduce((sum, p) => sum + (p.geoScore || 0), 0) /
+    Math.max(pagesArr.length, 1);
+
+  const weakCTAs = pagesArr.filter(p => (p.ctaScore || 0) < 3);
+
+  const leaks = pagesArr
+    .flatMap(p => p.conversionLeaks || [])
+    .filter(Boolean);
+
+  const insights = [];
+
+  if (failed.length) {
+    insights.push(`${failed.length} pages failed to load`);
+  }
+
+  if (avgGeo < 80) {
+    insights.push("Overall GEO performance is below strong enrollment threshold (<80)");
+  }
+
+  if (weakCTAs.length) {
+    insights.push("Multiple pages have weak CTA density or unclear action hierarchy");
+  }
+
+  if (leaks.length) {
+    insights.push("Conversion leaks detected across navigation and CTA structure");
+  }
+
+  if (!insights.length) {
+    insights.push("Strong enrollment UX performance across all scanned pages");
+  }
+
+  return {
+    avgGeo: Math.round(avgGeo),
+    insights
+  };
+}
+
+/**
+ * HEALTH
+ */
+app.get("/", (req, res) => {
+  res.json({
+    status: "Washburn UX Backend Running",
+    time: new Date().toISOString()
+  });
+});
+
+/**
+ * MAIN SCAN ENGINE
  */
 app.post("/api/scan-washburn", async (req, res) => {
+  console.log("SCAN STARTED");
+
   const results = {};
 
   for (const page of pages) {
@@ -152,141 +225,120 @@ app.post("/api/scan-washburn", async (req, res) => {
       const response = await axios.get(page.url, { timeout: 12000 });
       const html = response.data || "";
 
-      const score = scorePage({ html, url: page.url });
+      const signals = extractSignals(html);
+
+      // AI scoring (preferred)
+      const ai = await aiScorePage({
+        name: page.name,
+        url: page.url,
+        html
+      });
+
+      let geoScore, clarityScore, why, conversionLeaks, ctaQuality;
+
+      if (ai && typeof ai.geoScore === "number") {
+        geoScore = ai.geoScore;
+        clarityScore = ai.clarityScore;
+        why = ai.why;
+        conversionLeaks = ai.conversionLeaks || [];
+        ctaQuality = ai.ctaQuality || signals.ctaScore;
+      } else {
+        const fallback = fallbackScore(signals);
+
+        geoScore = fallback.geoScore;
+        clarityScore = fallback.clarityScore;
+        why = {
+          geo: ["Fallback scoring used (AI unavailable or failed)"],
+          clarity: ["Fallback scoring used (AI unavailable or failed)"]
+        };
+        conversionLeaks = [];
+        ctaQuality = signals.ctaScore;
+      }
 
       results[page.name] = {
         url: page.url,
         status: "success",
-        ...score,
-        why: [],
-        leaks: []
+        ...signals,
+        geoScore,
+        clarityScore,
+        ctaScore: ctaQuality,
+        why,
+        conversionLeaks
       };
-
     } catch (err) {
       results[page.name] = {
         url: page.url,
         status: "error",
-        error: err.message,
-        clarityScore: 0,
+        message: err.message,
         geoScore: 0,
-        why: ["Page failed to load or timed out."],
-        leaks: ["Critical failure: page unreachable"]
+        clarityScore: 0,
+        ctaScore: 0
       };
     }
   }
 
-  // enrich explanations
-  for (const key of Object.keys(results)) {
-    const page = results[key];
-    if (page.status === "success") {
-      page.why = explainScore(page, page);
-      page.leaks = detectLeaks(page);
-    }
-  }
+  const global = buildGlobalInsights(results);
 
-  const validPages = Object.values(results).filter(p => p.status === "success");
-
-  const avgGeo =
-    validPages.reduce((a, b) => a + b.geoScore, 0) / (validPages.length || 1);
-
-  const avgClarity =
-    validPages.reduce((a, b) => a + b.clarityScore, 0) / (validPages.length || 1);
-
-  const insights = [];
-
-  const weakPages = validPages.filter(p => p.geoScore < 70);
-  if (weakPages.length) {
-    insights.push(`${weakPages.length} pages under conversion threshold (<70 GEO).`);
-  }
-
-  const leakPages = validPages.filter(p => p.leaks.length > 0);
-  if (leakPages.length) {
-    insights.push("Conversion leaks detected across multiple pages.");
-  }
-
-  if (!insights.length) {
-    insights.push("All pages are structurally strong with stable conversion signals.");
-  }
-
-  return res.json({
+  res.json({
     status: "success",
-    overallGeoScore: Math.round(avgGeo),
-    overallClarityScore: Math.round(avgClarity),
+    ...global,
     pages: results,
-    insights,
     timestamp: new Date().toISOString()
   });
 });
 
 /**
- * AI COPY ENGINE (SAFE + NO CRASH PARSING)
+ * AI COPY ENGINE (STABLE)
  */
 app.post("/api/rewrite-page", async (req, res) => {
   const { pageName, url, persona } = req.body;
 
-  if (!pageName || !url) {
-    return res.status(400).json({ error: "Missing pageName or url" });
-  }
-
   if (!openai) {
-    return res.status(500).json({
-      error: "OpenAI not configured on server"
-    });
+    return res.status(500).json({ error: "OpenAI not configured" });
   }
-
-  const styleMap = {
-    highschool: "High school seniors: energetic, simple, motivating.",
-    transfer: "Transfer students: efficient, credit/value focused.",
-    adult: "Adult learners: flexible, respectful, outcome-focused."
-  };
 
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
+      temperature: 0.4,
+      response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            "You are a higher education conversion copy expert. Return ONLY valid JSON."
+            "You are a conversion copywriter for higher education landing pages."
         },
         {
           role: "user",
           content: `
-Rewrite this page:
+Rewrite page for enrollment conversion:
 
 Page: ${pageName}
 URL: ${url}
+Audience: ${persona || "highschool"}
 
-Audience:
-${styleMap[persona] || styleMap.highschool}
-
-Return JSON with:
-headline, subheadline, cta_primary, cta_secondary, body_copy, meta_description, conversion_improvements
-          `
+Return JSON:
+{
+  "headline": "",
+  "subheadline": "",
+  "cta_primary": "",
+  "cta_secondary": "",
+  "body_copy": "",
+  "meta_description": "",
+  "conversion_improvements": []
+}
+`
         }
       ]
     });
 
-    const text = completion.choices?.[0]?.message?.content || "{}";
-
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch (e) {
-      parsed = {
-        error: "AI returned invalid JSON",
-        raw: text
-      };
-    }
-
-    return res.json({
+    res.json({
       status: "success",
       page: pageName,
-      rewrite: parsed
+      rewrite: JSON.parse(completion.choices[0].message.content)
     });
-
   } catch (err) {
-    return res.status(500).json({
+    res.status(500).json({
       status: "error",
       message: err.message
     });
@@ -297,7 +349,6 @@ headline, subheadline, cta_primary, cta_secondary, body_copy, meta_description, 
  * START SERVER
  */
 const PORT = process.env.PORT || 3001;
-
 app.listen(PORT, () => {
   console.log(`Washburn UX Backend running on port ${PORT}`);
 });
