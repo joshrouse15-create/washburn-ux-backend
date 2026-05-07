@@ -202,7 +202,7 @@ headline, subheadline, cta_primary, cta_secondary, body_copy, meta_description, 
 `
         }
       ],
-      temperature: 0.7
+      temperature: 0.2
     });
 
     const output = JSON.parse(completion.choices[0].message.content);
