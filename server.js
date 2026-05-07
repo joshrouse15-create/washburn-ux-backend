@@ -3,18 +3,36 @@ const cors = require("cors");
 const axios = require("axios");
 require("dotenv").config();
 
-const OpenAI = require("openai");
+let OpenAI;
+let openai;
+
+// OPTIONAL: only load OpenAI if installed + key exists
+try {
+  OpenAI = require("openai");
+  if (process.env.OPENAI_API_KEY) {
+    openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  }
+} catch (e) {
+  console.log("OpenAI not installed or disabled");
+}
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+/**
+ * HEALTH CHECK
+ */
+app.get("/", (req, res) => {
+  res.json({
+    status: "Washburn UX Backend Running",
+    time: new Date().toISOString()
+  });
 });
 
 /**
- * PAGE LIST
+ * PAGES TO SCAN
  */
 const pages = [
   { name: "home", url: "https://www.washburn.edu" },
@@ -28,256 +46,102 @@ const pages = [
 ];
 
 /**
- * HEALTH
- */
-app.get("/", (req, res) => {
-  res.json({
-    status: "GEO Intelligence Engine v4 Running",
-    time: new Date().toISOString()
-  });
-});
-
-/**
- * HTML CLEANER
- */
-function extractText(html = "") {
-  return html
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<\/?[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 12000);
-}
-
-/**
- * ROLE MAP (IMPORTANT FOR AI DIFFERENTIATION)
- */
-function classify(name, url) {
-  if (name === "home") return "awareness";
-  if (url.includes("apply")) return "conversion";
-  if (url.includes("scholar")) return "financial-aid";
-  if (url.includes("res")) return "experience";
-  if (url.includes("promise")) return "value";
-  return "support";
-}
-
-/**
- * SAFE PARSER (HARDENED)
- */
-function safeParse(raw) {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    try {
-      return JSON.parse(raw.replace(/```json|```/g, "").trim());
-    } catch {
-      return null;
-    }
-  }
-}
-
-/**
- * GUARANTEED STRUCTURE (fixes undefined everywhere)
- */
-function fallback(page, err) {
-  return {
-    url: page.url,
-    status: "error",
-    geoScore: 0,
-    clarityScore: 0,
-    why: ["AI failure fallback triggered"],
-    issues: [err?.message || "Unknown error"],
-    fixes: ["Check OpenAI API key / response format"],
-    conversionLeaks: ["Unable to analyze"]
-  };
-}
-
-/**
- * AI CORE GEO ENGINE
- */
-async function analyzePage(page, html, contextPages) {
-  const role = classify(page.name, page.url);
-  const content = extractText(html);
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.4,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `
-You are a GEO (Generative Enrollment Optimization) intelligence engine.
-
-RULES:
-- Scores MUST differ across pages based on role + content
-- Never reuse patterns between pages
-- You MUST explain WHY each score exists
-- Output must be strict JSON only
-- Be specific, not generic
-`
-        },
-        {
-          role: "user",
-          content: `
-PAGE: ${page.name}
-URL: ${page.url}
-ROLE: ${role}
-
-OTHER PAGES CONTEXT:
-${JSON.stringify(contextPages)}
-
-CONTENT:
-${content}
-
-Return JSON:
-
-{
-  "geoScore": number,
-  "clarityScore": number,
-
-  "why": ["detailed reasoning tied to content + role"],
-
-  "issues": ["specific UX or messaging gaps"],
-
-  "fixes": ["actionable improvements (not generic advice)"],
-
-  "conversionLeaks": [
-    "where users hesitate or drop off"
-  ],
-
-  "pageDiagnosis": "2-3 sentence expert evaluation",
-
-  "priorityFix": "single highest-impact change"
-}
-`
-        }
-      ]
-    });
-
-    const raw = completion?.choices?.[0]?.message?.content;
-    const parsed = safeParse(raw);
-
-    if (!parsed) return fallback(page, new Error("Invalid JSON from AI"));
-
-    return {
-      url: page.url,
-      status: "success",
-
-      geoScore: parsed.geoScore ?? 50,
-      clarityScore: parsed.clarityScore ?? 50,
-
-      why: parsed.why || [],
-      issues: parsed.issues || [],
-      fixes: parsed.fixes || [],
-      conversionLeaks: parsed.conversionLeaks || [],
-
-      pageDiagnosis: parsed.pageDiagnosis || "",
-      priorityFix: parsed.priorityFix || ""
-    };
-
-  } catch (err) {
-    return fallback(page, err);
-  }
-}
-
-/**
- * SCAN ENGINE
+ * LIGHTWEIGHT PAGE SCANNER
  */
 app.post("/api/scan-washburn", async (req, res) => {
+  console.log("SCAN STARTED");
+
   const results = {};
-  const context = pages.map(p => ({ name: p.name, url: p.url }));
-
-  for (const page of pages) {
-    try {
-      const html = (await axios.get(page.url, { timeout: 15000 })).data;
-
-      const ai = await analyzePage(page, html, context);
-
-      results[page.name] = ai;
-
-    } catch (err) {
-      results[page.name] = fallback(page, err);
-    }
-  }
-
-  const valid = Object.values(results).filter(r => r.status === "success");
-
-  const avgGeo = Math.round(
-    valid.reduce((a, b) => a + b.geoScore, 0) / valid.length
-  );
-
-  const avgClarity = Math.round(
-    valid.reduce((a, b) => a + b.clarityScore, 0) / valid.length
-  );
-
-  res.json({
-    status: "success",
-    overallGeoScore: avgGeo,
-    overallClarityScore: avgClarity,
-    pages: results,
-    timestamp: new Date().toISOString(),
-    insights: [
-      "AI-driven GEO scoring active",
-      "Role-based page differentiation enabled",
-      "Conversion leak detection active"
-    ]
-  });
-});
-
-/**
- * AI COPY ENGINE (STABLE)
- */
-app.post("/api/rewrite-page", async (req, res) => {
-  const { pageName, url, persona } = req.body;
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.4,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: "Return ONLY valid JSON marketing copy."
-        },
-        {
-          role: "user",
-          content: `
-Page: ${pageName}
-URL: ${url}
-Persona: ${persona}
+    for (const page of pages) {
+      try {
+        const response = await axios.get(page.url, { timeout: 12000 });
+        const html = response.data || "";
+        const lower = html.toLowerCase();
 
-Return:
-{
-  "headline": "",
-  "subheadline": "",
-  "cta_primary": "",
-  "cta_secondary": "",
-  "body_copy": "",
-  "meta_description": "",
-  "conversion_improvements": []
-}
-`
+        const hasTitle = lower.includes("<title>");
+        const hasH1 = lower.includes("<h1>");
+        const hasNav = lower.includes("<nav>");
+
+        const ctaWords = [
+          "apply",
+          "visit",
+          "tour",
+          "admission",
+          "enroll",
+          "request",
+          "start",
+          "submit"
+        ];
+
+        let ctaScore = 0;
+        for (const word of ctaWords) {
+          if (lower.includes(word)) ctaScore++;
         }
-      ]
-    });
 
-    const raw = completion?.choices?.[0]?.message?.content;
-    const parsed = safeParse(raw);
+        const clarityScore = Math.min(
+          100,
+          (hasTitle ? 25 : 0) +
+          (hasH1 ? 25 : 0) +
+          (hasNav ? 15 : 0) +
+          ctaScore * 10
+        );
 
-    if (!parsed) {
-      return res.status(500).json({
-        status: "error",
-        message: "AI returned invalid JSON"
-      });
+        const geoScore = Math.min(
+          100,
+          Math.round(clarityScore * 0.7 + ctaScore * 5)
+        );
+
+        results[page.name] = {
+          url: page.url,
+          htmlLength: html.length,
+          hasTitle,
+          hasH1,
+          hasNav,
+          ctaScore,
+          clarityScore,
+          geoScore
+        };
+
+      } catch (err) {
+        results[page.name] = {
+          url: page.url,
+          error: true,
+          message: err.message
+        };
+      }
+    }
+
+    const valid = Object.values(results).filter(r => r.geoScore !== undefined);
+
+    const avgGeo =
+      valid.length > 0
+        ? Math.round(valid.reduce((a, b) => a + b.geoScore, 0) / valid.length)
+        : 0;
+
+    const avgClarity =
+      valid.length > 0
+        ? Math.round(valid.reduce((a, b) => a + b.clarityScore, 0) / valid.length)
+        : 0;
+
+    const insights = [];
+
+    if (avgGeo < 70) insights.push("GEO visibility below target threshold");
+    if ((results.apply?.ctaScore || 0) < 3) insights.push("Apply page weak CTA signals");
+    if ((results.scholarships?.ctaScore || 0) < 2) insights.push("Scholarships page weak urgency language");
+
+    if (!insights.length) {
+      insights.push("Baseline UX structure is stable");
     }
 
     res.json({
       status: "success",
-      rewrite: parsed
+      overallGeoScore: avgGeo,
+      overallClarityScore: avgClarity,
+      pages: results,
+      insights,
+      timestamp: new Date().toISOString()
     });
 
   } catch (err) {
@@ -289,10 +153,79 @@ Return:
 });
 
 /**
- * START
+ * OPTIONAL AI REWRITE (SAFE GUARD)
+ */
+app.post("/api/rewrite-page", async (req, res) => {
+  if (!openai) {
+    return res.status(200).json({
+      status: "disabled",
+      message: "OpenAI not enabled on this deployment"
+    });
+  }
+
+  const { pageName, url, persona } = req.body;
+
+  if (!pageName || !url) {
+    return res.status(400).json({
+      status: "error",
+      message: "Missing pageName or url"
+    });
+  }
+
+  const styles = {
+    highschool: "Write for high school seniors.",
+    transfer: "Write for transfer students.",
+    adult: "Write for adult learners."
+  };
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: "Return ONLY valid JSON. No markdown."
+        },
+        {
+          role: "user",
+          content: `
+Rewrite this page:
+
+URL: ${url}
+Page: ${pageName}
+
+Style:
+${styles[persona] || styles.highschool}
+
+Return:
+headline, subheadline, cta_primary, cta_secondary, body_copy, meta_description, conversion_improvements
+`
+        }
+      ],
+      temperature: 0.7
+    });
+
+    const output = JSON.parse(completion.choices[0].message.content);
+
+    res.json({
+      status: "success",
+      page: pageName,
+      rewrite: output
+    });
+
+  } catch (err) {
+    res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
+});
+
+/**
+ * START SERVER
  */
 const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
-  console.log(`GEO Intelligence Engine running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
